@@ -1,16 +1,12 @@
-
-# --- Podstawowe biblioteki do analizy wideo i AI ---
-
-# Do wczytywania i przetwarzania wideo
-opencv-python
-
-# Do wykrywania twarzy i tworzenia ich "odcisków" (embeddings)
-face-recognition
-
-# Do klasteryzacji, czyli grupowania podobnych twarzy
-scikit-learn
-
-# Do operacji na tablicach numerycznych (używane przez powyższe biblioteki)
+# Główne biblioteki
 numpy
+opencv-python
+torch
+torchvision
+scikit-learn
+ultralytics
+tqdm
 
-rich
+# DeepSORT - instalowany z GitHuba, ale te zależności są potrzebne
+scipy
+lap
