@@ -1,4 +1,3 @@
-# Główne biblioteki
 numpy
 opencv-python
 torch
@@ -6,7 +5,5 @@ torchvision
 scikit-learn
 ultralytics
 tqdm
-
-# DeepSORT - instalowany z GitHuba, ale te zależności są potrzebne
 scipy
 lap

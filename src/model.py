@@ -1,121 +1,142 @@
-
-
-import cv2
-import face_recognition
-from sklearn.cluster import DBSCAN
-from collections import defaultdict
-import numpy as np
-import os
 import torch
-
-# Biblioteki do interfejsu w konsoli i YOLO
-from rich.console import Console
-from rich.table import Table
-from rich.progress import track
+import cv2
+import numpy as np
 from ultralytics import YOLO
+from deep_sort_pytorch.utils.parser import get_config
+from deep_sort_pytorch.deep_sort import DeepSort
+from collections import defaultdict
+from sklearn.cluster import DBSCAN
+import os
+import warnings
+from tqdm import tqdm
 
-# --- KONFIGURACJA ---
-VIDEO_PATH = "../movies/video_1.mp4"
-OUTPUT_DIR = "output_portraits"
-FRAME_SKIP = 2  # Możemy analizować więcej klatek, bo GPU jest szybsze
-DBSCAN_EPS = 0.45
+# --- Konfiguracja ---
+VIDEO_PATH = '../movies/video_4.mp4'  # Ścieżka do pliku wideo
+MIN_DETECTION_CONFIDENCE = 0.6  # Minimalna pewność detekcji YOLO (0.0 - 1.0)
+DBSCAN_EPS = 0.5  # Parametr DBSCAN: maksymalna odległość między próbkami w jednym klastrze
+DBSCAN_MIN_SAMPLES = 5  # Parametr DBSCAN: minimalna liczba próbek w sąsiedztwie, aby punkt był uznany za centralny
+FRAME_PROCESSING_INTERVAL = 5 # Co która klatka będzie przetwarzana (1 = każda)
 
-# --- INICJALIZACJA ---
-console = Console()
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-face_data = []
+# --- Inicjalizacja modeli ---
+warnings.filterwarnings('ignore')
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print(f"Używane urządzenie: {device}")
 
-# Sprawdź, czy GPU jest dostępne dla PyTorch/YOLO
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
-console.print(f"Używane urządzenie: [bold {'green' if device == 'cuda' else 'red'}]{device}[/]")
-#
-# Załaduj model YOLOv8 wytrenowany do wykrywania twarzy.
-# Model zostanie automatycznie pobrany przy pierwszym uruchomieniu.
-console.print("[cyan]Ładowanie modelu detekcji twarzy YOLOv8...[/cyan]")
-yolo_model = YOLO('yolov8n-face.pt')
+# Inicjalizacja YOLOv8
+print("Ładowanie modelu YOLOv8...")
+yolo = YOLO('yolov8n.pt')
+print("Model YOLOv8 załadowany.")
 
-# --- FAZA 1: ZBIERANIE DANYCH Z WIDEO (DETEKCJA NA GPU) ---
-video_capture = cv2.VideoCapture(VIDEO_PATH)
-total_frames = int(video_capture.get(cv2.CAP_PROP_FRAME_COUNT))
-fps = video_capture.get(cv2.CAP_PROP_FPS)
+# Inicjalizacja DeepSORT
+print("Ładowanie modelu DeepSORT...")
+cfg_deep = get_config()
+cfg_deep.merge_from_file("deep_sort_pytorch/configs/deep_sort.yaml")
+deepsort = DeepSort(cfg_deep.DEEPSORT.REID_CKPT,
+                    max_dist=cfg_deep.DEEPSORT.MAX_DIST,
+                    min_confidence=cfg_deep.DEEPSORT.MIN_CONFIDENCE,
+                    nms_max_overlap=cfg_deep.DEEPSORT.NMS_MAX_OVERLAP,
+                    max_iou_distance=cfg_deep.DEEPSORT.MAX_IOU_DISTANCE,
+                    max_age=cfg_deep.DEEPSORT.MAX_AGE, n_init=cfg_deep.DEEPSORT.N_INIT,
+                    nn_budget=cfg_deep.DEEPSORT.NN_BUDGET,
+                    use_cuda=True if device.type == 'cuda' else False)
+print("Model DeepSORT załadowany.")
 
-console.print(f"[bold cyan]Faza 1: Analizowanie {total_frames} klatek wideo z użyciem YOLOv8...[/bold cyan]")
 
-for frame_num in track(range(total_frames), description="Przetwarzanie..."):
-    ret, frame = video_capture.read()
+# --- Przetwarzanie wideo ---
+track_frames = defaultdict(list)
+track_features = defaultdict(list)
+
+print(f"\nRozpoczynanie przetwarzania wideo: {VIDEO_PATH}")
+cap = cv2.VideoCapture(VIDEO_PATH)
+if not cap.isOpened():
+    raise IOError(f"Błąd: Nie można otworzyć pliku wideo: {VIDEO_PATH}")
+
+fps = cap.get(cv2.CAP_PROP_FPS)
+total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+progress_bar = tqdm(total=total_frames, desc="Analiza klatek", unit="klatka")
+
+frame_count = 0
+while True:
+    ret, frame = cap.read()
     if not ret:
         break
 
-    if frame_num % FRAME_SKIP == 0:
-        # 1. DETEKCJA TWARZY ZA POMOCĄ YOLO (szybkie, na GPU)
-        results = yolo_model.predict(frame, device=device, verbose=False)
-        # Pobierz współrzędne ramek (bounding boxes)
-        boxes = results[0].boxes.xyxy.cpu().numpy().astype(int)
+    frame_count += 1
+    progress_bar.update(1)
+
+    if frame_count % FRAME_PROCESSING_INTERVAL != 0:
+        continue
+
+    # Detekcja obiektów (klasa 0 to 'person')
+    results = yolo(frame, classes=[0], conf=MIN_DETECTION_CONFIDENCE, verbose=False)
+
+    detections = []
+    for result in results[0].boxes:
+        x1, y1, x2, y2 = result.xyxy[0].cpu().numpy()
+        conf = result.conf[0].cpu().numpy()
+        detections.append(([int(x1), int(y1), int(x2 - x1), int(y2 - y1)], conf, 0))
+
+    # Aktualizacja śledzenia
+    tracks = deepsort.update(detections, frame)
+
+    # Zbieranie cech i klatek dla każdej ścieżki
+    for track in tracks:
+        if not track.is_confirmed():
+            continue
         
-        # Konwertuj format ramki z (x1, y1, x2, y2) na format dlib (top, right, bottom, left)
-        yolo_locations = [(box[1], box[2], box[3], box[0]) for box in boxes]
+        track_id = track.track_id
+        feature = track.get_feature()
+        track_frames[track_id].append(frame_count)
+        track_features[track_id].append(feature)
 
-        # 2. TWORZENIE "ODCISKÓW" TWARZY (szybkie, bo tylko dla znalezionych twarzy)
-        face_encodings = face_recognition.face_encodings(frame, yolo_locations)
+progress_bar.close()
+cap.release()
+print("Przetwarzanie wideo zakończone.")
 
-        for i, encoding in enumerate(face_encodings):
-            face_data.append({
-                "encoding": encoding,
-                "frame": frame,
-                "location": yolo_locations[i]
-            })
+# --- Klasteryzacja i obliczanie czasu ---
+print("\nRozpoczynanie klasteryzacji...")
 
-video_capture.release()
-console.print(f"[bold green]✔ Zakończono. Znaleziono {len(face_data)} wystąpień twarzy.[/bold green]")
+all_features = []
+track_id_map = []
+for track_id, features in track_features.items():
+    if len(features) > 0:
+        # Uśrednienie wektorów cech dla danego śladu zwiększa stabilność klasteryzacji
+        avg_feature = np.mean(features, axis=0)
+        all_features.append(avg_feature)
+        track_id_map.append(track_id)
 
-
-# --- FAZA 2, 3 i 4: KLASTERYZACJA, ZAPIS I WYNIKI (bez zmian) ---
-
-if not face_data:
-    console.print("[bold red]Nie znaleziono żadnych twarzy w wideo.[/bold red]")
+if not all_features:
+    print("Nie wykryto żadnych osób w filmie.")
     exit()
 
-console.print("[bold cyan]Faza 2: Grupowanie podobnych twarzy...[/bold cyan]")
-all_encodings = [d["encoding"] for d in face_data]
-clt = DBSCAN(metric="euclidean", n_jobs=-1, eps=DBSCAN_EPS)
-clt.fit(all_encodings)
+all_features = np.array(all_features)
 
-unique_labels = set(clt.labels_)
-num_unique_people = len(unique_labels) - (1 if -1 in unique_labels else 0)
-console.print(f"[bold green]✔ Odkryto {num_unique_people} unikalnych osób.[/bold green]")
+# Uruchomienie algorytmu DBSCAN
+clustering = DBSCAN(eps=DBSCAN_EPS, min_samples=DBSCAN_MIN_SAMPLES, metric='euclidean').fit(all_features)
+labels = clustering.labels_
+num_unique_persons = len(set(labels)) - (1 if -1 in labels else 0)
+print(f"Klasteryzacja zakończona. Znaleziono {num_unique_persons} unikalnych osób.")
 
-console.print("[bold cyan]Faza 3: Zapisywanie portretów i obliczanie czasu...[/bold cyan]")
-saved_portraits = {}
-label_counts = defaultdict(int)
+# Mapowanie tymczasowych ID śladów na finalne ID osób
+person_map = {track_id: f"Osoba_{label}" for track_id, label in zip(track_id_map, labels) if label != -1}
 
-for i, label in enumerate(clt.labels_):
-    if label == -1: continue
-    label_counts[label] += 1
-    if label not in saved_portraits:
-        top, right, bottom, left = face_data[i]["location"]
-        frame = face_data[i]["frame"]
-        padding = 20
-        face_image = frame[max(0, top-padding):bottom+padding, max(0, left-padding):right+padding]
-        portrait_filename = f"Osoba_{label + 1}.jpg"
-        portrait_path = os.path.join(OUTPUT_DIR, portrait_filename)
-        cv2.imwrite(portrait_path, face_image)
-        saved_portraits[label] = portrait_filename
+# Obliczanie czasu na ekranie
+screen_time = defaultdict(float)
+frame_duration = 1.0 / fps
 
-table = Table(title="Wyniki Analizy Czasu na Ekranie (GPU + YOLOv8)")
-table.add_column("ID Osoby", justify="center", style="cyan")
-table.add_column("Identyfikator Zdjęcia", justify="left", style="magenta")
-table.add_column("Szacowany Czas na Ekranie", justify="center", style="green")
+for track_id, person_label in person_map.items():
+    num_processed_frames = len(track_frames[track_id])
+    estimated_total_frames = num_processed_frames * FRAME_PROCESSING_INTERVAL
+    time_in_track = estimated_total_frames * frame_duration
+    screen_time[person_label] += time_in_track
 
-sorted_labels = sorted(label_counts.keys(), key=lambda l: label_counts[l], reverse=True)
-
-for label in sorted_labels:
-    count = label_counts[label]
-    portrait_file = saved_portraits.get(label, "Brak zdjęcia")
-    total_frames = count * FRAME_SKIP
-    total_seconds = total_frames / fps
-    minutes, seconds = divmod(total_seconds, 60)
-    time_str = f"{int(minutes):02d}:{int(seconds):02d}"
-    table.add_row(f"Osoba_{label + 1}", portrait_file, time_str)
-
-console.print(table)
-console.print(f"\n[bold yellow]Zdjęcia identyfikacyjne zostały zapisane w folderze '{OUTPUT_DIR}'.[/bold yellow]")
+# --- Wyświetlanie wyników ---
+print("\n--- Wyniki Analizy ---")
+if not screen_time:
+    print("Nie zidentyfikowano żadnych unikalnych osób.")
+    print("Wskazówka: Spróbuj dostosować parametry DBSCAN (np. DBSCAN_MIN_SAMPLES, DBSCAN_EPS).")
+else:
+    sorted_screen_time = sorted(screen_time.items(), key=lambda item: item[1], reverse=True)
+    for person, time in sorted_screen_time:
+        print(f"{person}: {time:.2f} sekund")
