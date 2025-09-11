@@ -29,8 +29,9 @@ MIN_SAMPLES = 2
 torch.serialization.add_safe_globals([tasks.DetectionModel])
 
 print("Loading YOLO model...")
-# YOLO will automatically use the GPU if PyTorch is set up correctly.
-person_detector = YOLO("yolov8n.pt")
+# 🚀 UPGRADE: Using the more powerful 'medium' model for better accuracy.
+# The library will download this automatically on the first run.
+person_detector = YOLO("yolov8m.pt")
 PERSON_CLASS_ID = 0
 
 all_faces_data = []
@@ -51,11 +52,11 @@ for frame_num in tqdm(range(total_frames), desc="Pass 1: Extracting face data"):
         small_frame = cv2.resize(frame, (int(width * RESIZE_FACTOR), int(height * RESIZE_FACTOR)))
         rgb_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
 
-        # Tell YOLO to explicitly use the first GPU (device=0) for inference
-        person_results = person_detector(small_frame, classes=[PERSON_CLASS_ID], verbose=False, device=0)
-        person_boxes = person_results[0].boxes.xyxy.cpu().numpy() # Move results to CPU for numpy/cv2
+        # 🔧 ADJUSTMENT: Lowering confidence threshold to detect more people.
+        # Default is 0.25. Lower values find more, but might add false positives.
+        person_results = person_detector(small_frame, classes=[PERSON_CLASS_ID], verbose=False, device=0, conf=0.15)
+        person_boxes = person_results[0].boxes.xyxy.cpu().numpy()
 
-        # This will automatically use the GPU if dlib was compiled with CUDA support.
         face_locations = face_recognition.face_locations(rgb_frame, model='cnn')
         face_encodings = face_recognition.face_encodings(rgb_frame, face_locations)
 
@@ -80,7 +81,6 @@ cap.release()
 print(f"Pass 1 complete. Found a total of {len(all_faces_data)} face instances.")
 
 # --- PASS 2: CLUSTERING, SUMMARY & GIF CREATION ---
-# (No changes needed in Pass 2 as DBSCAN runs on the CPU)
 if not all_faces_data:
     print("No faces were detected in the video. Exiting.")
     exit()
