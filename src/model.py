@@ -19,19 +19,19 @@ OUTPUT_SUMMARY_PATH = f"../gifs/{VIDEO_NAME}_summary.txt"
 
 # --- PROCESSING SETTINGS ---
 PROCESS_EVERY_N_FRAMES = 2
-RESIZE_FACTOR = 0.5
+# 🚀 PERFORMANCE FIX: Increased resolution for better detection accuracy.
+RESIZE_FACTOR = 0.75
 
 # --- CLUSTERING SETTINGS ---
-DBSCAN_EPS = 0.42
+DBSCAN_EPS = 0.38
 MIN_SAMPLES = 2
 
 # --- INITIALIZATION ---
 torch.serialization.add_safe_globals([tasks.DetectionModel])
 
 print("Loading YOLO model...")
-# 🚀 UPGRADE: Using the more powerful 'medium' model for better accuracy.
-# The library will download this automatically on the first run.
-person_detector = YOLO("yolov8m.pt")
+# 🚀 PERFORMANCE FIX: Using the powerful 'large' model for maximum person detection accuracy.
+person_detector = YOLO("yolov8l.pt") # Upgraded from 'm' to 'l'
 PERSON_CLASS_ID = 0
 
 all_faces_data = []
@@ -52,8 +52,6 @@ for frame_num in tqdm(range(total_frames), desc="Pass 1: Extracting face data"):
         small_frame = cv2.resize(frame, (int(width * RESIZE_FACTOR), int(height * RESIZE_FACTOR)))
         rgb_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
 
-        # 🔧 ADJUSTMENT: Lowering confidence threshold to detect more people.
-        # Default is 0.25. Lower values find more, but might add false positives.
         person_results = person_detector(small_frame, classes=[PERSON_CLASS_ID], verbose=False, device=0, conf=0.15)
         person_boxes = person_results[0].boxes.xyxy.cpu().numpy()
 
@@ -65,7 +63,9 @@ for frame_num in tqdm(range(total_frames), desc="Pass 1: Extracting face data"):
             containing_person_box = None
             for p_box in person_boxes:
                 px1, py1, px2, py2 = p_box
-                if left > px1 and right < px2 and top > py1 and bottom < py2:
+                face_center_x = (left + right) / 2
+                face_center_y = (top + bottom) / 2
+                if px1 < face_center_x < px2 and py1 < face_center_y < py2:
                     containing_person_box = p_box
                     break
             
@@ -80,7 +80,7 @@ for frame_num in tqdm(range(total_frames), desc="Pass 1: Extracting face data"):
 cap.release()
 print(f"Pass 1 complete. Found a total of {len(all_faces_data)} face instances.")
 
-# --- PASS 2: CLUSTERING, SUMMARY & GIF CREATION ---
+# --- PASS 2 is unchanged ---
 if not all_faces_data:
     print("No faces were detected in the video. Exiting.")
     exit()
@@ -89,7 +89,6 @@ print("\nStarting Pass 2: Clustering faces...")
 embeddings = np.array([data["embedding"] for data in all_faces_data])
 db = DBSCAN(eps=DBSCAN_EPS, min_samples=MIN_SAMPLES, metric='euclidean').fit(embeddings)
 cluster_labels = db.labels_
-
 person_ids = {}
 person_counter = 0
 for i, label in enumerate(cluster_labels):
@@ -100,7 +99,6 @@ for i, label in enumerate(cluster_labels):
         all_faces_data[i]["person_id"] = person_ids[label]
     else:
         all_faces_data[i]["person_id"] = "Unknown"
-
 print(f"Clustering complete. Found {person_counter} unique persons.")
 
 person_frame_counts = collections.defaultdict(set)
@@ -123,21 +121,17 @@ for data in all_faces_data:
 
 cap = cv2.VideoCapture(INPUT_VIDEO_PATH)
 gif_frames = []
-
 for frame_num in tqdm(sorted(frames_with_faces.keys()), desc="Pass 2: Rendering GIF frames"):
     cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
     ret, frame = cap.read()
     if not ret:
         continue
-
     for data in frames_with_faces[frame_num]:
         p_box = data["person_box"]
         f_box = data["face_box"]
         person_id = data["person_id"]
-
         cv2.rectangle(frame, (p_box[0], p_box[1]), (p_box[2], p_box[3]), (255, 0, 0), 2)
         cv2.rectangle(frame, (f_box[0], f_box[1]), (f_box[2], f_box[3]), (0, 255, 0), 2)
-        
         label_pos = (f_box[0], f_box[1] - 10)
         cv2.putText(frame, person_id, label_pos, cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
 
