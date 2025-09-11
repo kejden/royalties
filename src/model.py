@@ -1,142 +1,163 @@
 import torch
+from ultralytics.nn import tasks
 import cv2
 import numpy as np
 from ultralytics import YOLO
-from deep_sort_pytorch.utils.parser import get_config
-from deep_sort_pytorch.deep_sort import DeepSort
-from collections import defaultdict
+import face_recognition
 from sklearn.cluster import DBSCAN
-import os
-import warnings
-from tqdm import tqdm
+from PIL import Image
+import collections
+from tqdm import tqdm # Import tqdm for progress bars
 
-# --- Konfiguracja ---
-VIDEO_PATH = '../movies/video_4.mp4'  # Ścieżka do pliku wideo
-MIN_DETECTION_CONFIDENCE = 0.6  # Minimalna pewność detekcji YOLO (0.0 - 1.0)
-DBSCAN_EPS = 0.5  # Parametr DBSCAN: maksymalna odległość między próbkami w jednym klastrze
-DBSCAN_MIN_SAMPLES = 5  # Parametr DBSCAN: minimalna liczba próbek w sąsiedztwie, aby punkt był uznany za centralny
-FRAME_PROCESSING_INTERVAL = 5 # Co która klatka będzie przetwarzana (1 = każda)
+# --- CONFIGURATION ---
+VIDEO_NAME = "video_5"
 
-# --- Inicjalizacja modeli ---
-warnings.filterwarnings('ignore')
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-print(f"Używane urządzenie: {device}")
+# --- PATHS ---
+INPUT_VIDEO_PATH = f"../movies/{VIDEO_NAME}.mp4"
+OUTPUT_GIF_PATH = f"../gifs/{VIDEO_NAME}.gif"
+OUTPUT_SUMMARY_PATH = f"../gifs/{VIDEO_NAME}_summary.txt" # Path for the new summary file
 
-# Inicjalizacja YOLOv8
-print("Ładowanie modelu YOLOv8...")
-yolo = YOLO('yolov8n.pt')
-print("Model YOLOv8 załadowany.")
+# --- PROCESSING SETTINGS ---
+PROCESS_EVERY_N_FRAMES = 2  # Process 1 frame every N frames to speed things up
+RESIZE_FACTOR = 0.5         # Resize frames to speed up processing (0.5 = half size)
 
-# Inicjalizacja DeepSORT
-print("Ładowanie modelu DeepSORT...")
-cfg_deep = get_config()
-cfg_deep.merge_from_file("deep_sort_pytorch/configs/deep_sort.yaml")
-deepsort = DeepSort(cfg_deep.DEEPSORT.REID_CKPT,
-                    max_dist=cfg_deep.DEEPSORT.MAX_DIST,
-                    min_confidence=cfg_deep.DEEPSORT.MIN_CONFIDENCE,
-                    nms_max_overlap=cfg_deep.DEEPSORT.NMS_MAX_OVERLAP,
-                    max_iou_distance=cfg_deep.DEEPSORT.MAX_IOU_DISTANCE,
-                    max_age=cfg_deep.DEEPSORT.MAX_AGE, n_init=cfg_deep.DEEPSORT.N_INIT,
-                    nn_budget=cfg_deep.DEEPSORT.NN_BUDGET,
-                    use_cuda=True if device.type == 'cuda' else False)
-print("Model DeepSORT załadowany.")
+# --- CLUSTERING SETTINGS ---
+DBSCAN_EPS = 0.42           # Clustering sensitivity: lower is stricter, higher is more lenient
+MIN_SAMPLES = 2             # Minimum occurrences of a face to be considered a person
 
+# --- INITIALIZATION ---
+# This line is a fix for a specific PyTorch/Ultralytics version incompatibility
+torch.serialization.add_safe_globals([tasks.DetectionModel])
 
-# --- Przetwarzanie wideo ---
-track_frames = defaultdict(list)
-track_features = defaultdict(list)
+print("Loading YOLO model...")
+person_detector = YOLO("yolov8n.pt")
+PERSON_CLASS_ID = 0
 
-print(f"\nRozpoczynanie przetwarzania wideo: {VIDEO_PATH}")
-cap = cv2.VideoCapture(VIDEO_PATH)
-if not cap.isOpened():
-    raise IOError(f"Błąd: Nie można otworzyć pliku wideo: {VIDEO_PATH}")
+all_faces_data = []
 
-fps = cap.get(cv2.CAP_PROP_FPS)
+# --- PASS 1: DATA EXTRACTION ---
+print(f"Starting Pass 1: Extracting face data from '{INPUT_VIDEO_PATH}'...")
+cap = cv2.VideoCapture(INPUT_VIDEO_PATH)
 total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+fps = cap.get(cv2.CAP_PROP_FPS)
 
-progress_bar = tqdm(total=total_frames, desc="Analiza klatek", unit="klatka")
-
-frame_count = 0
-while True:
+for frame_num in tqdm(range(total_frames), desc="Pass 1: Extracting face data"):
     ret, frame = cap.read()
     if not ret:
         break
 
-    frame_count += 1
-    progress_bar.update(1)
+    if frame_num % PROCESS_EVERY_N_FRAMES == 0:
+        height, width, _ = frame.shape
+        small_frame = cv2.resize(frame, (int(width * RESIZE_FACTOR), int(height * RESIZE_FACTOR)))
+        rgb_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
 
-    if frame_count % FRAME_PROCESSING_INTERVAL != 0:
-        continue
+        person_results = person_detector(small_frame, classes=[PERSON_CLASS_ID], verbose=False)
+        person_boxes = person_results[0].boxes.xyxy.cpu().numpy()
 
-    # Detekcja obiektów (klasa 0 to 'person')
-    results = yolo(frame, classes=[0], conf=MIN_DETECTION_CONFIDENCE, verbose=False)
+        face_locations = face_recognition.face_locations(rgb_frame, model='cnn')
+        face_encodings = face_recognition.face_encodings(rgb_frame, face_locations)
 
-    detections = []
-    for result in results[0].boxes:
-        x1, y1, x2, y2 = result.xyxy[0].cpu().numpy()
-        conf = result.conf[0].cpu().numpy()
-        detections.append(([int(x1), int(y1), int(x2 - x1), int(y2 - y1)], conf, 0))
+        for i, (top, right, bottom, left) in enumerate(face_locations):
+            face_box = [left, top, right, bottom]
+            containing_person_box = None
+            for p_box in person_boxes:
+                px1, py1, px2, py2 = p_box
+                if left > px1 and right < px2 and top > py1 and bottom < py2:
+                    containing_person_box = p_box
+                    break
+            
+            if containing_person_box is not None:
+                all_faces_data.append({
+                    "frame_num": frame_num,
+                    "person_box": [int(x / RESIZE_FACTOR) for x in containing_person_box],
+                    "face_box": [int(x / RESIZE_FACTOR) for x in face_box],
+                    "embedding": face_encodings[i]
+                })
 
-    # Aktualizacja śledzenia
-    tracks = deepsort.update(detections, frame)
-
-    # Zbieranie cech i klatek dla każdej ścieżki
-    for track in tracks:
-        if not track.is_confirmed():
-            continue
-        
-        track_id = track.track_id
-        feature = track.get_feature()
-        track_frames[track_id].append(frame_count)
-        track_features[track_id].append(feature)
-
-progress_bar.close()
 cap.release()
-print("Przetwarzanie wideo zakończone.")
+print(f"Pass 1 complete. Found a total of {len(all_faces_data)} face instances.")
 
-# --- Klasteryzacja i obliczanie czasu ---
-print("\nRozpoczynanie klasteryzacji...")
-
-all_features = []
-track_id_map = []
-for track_id, features in track_features.items():
-    if len(features) > 0:
-        # Uśrednienie wektorów cech dla danego śladu zwiększa stabilność klasteryzacji
-        avg_feature = np.mean(features, axis=0)
-        all_features.append(avg_feature)
-        track_id_map.append(track_id)
-
-if not all_features:
-    print("Nie wykryto żadnych osób w filmie.")
+# --- PASS 2: CLUSTERING, SUMMARY & GIF CREATION ---
+if not all_faces_data:
+    print("No faces were detected in the video. Exiting.")
     exit()
 
-all_features = np.array(all_features)
+print("\nStarting Pass 2: Clustering faces...")
+embeddings = np.array([data["embedding"] for data in all_faces_data])
+db = DBSCAN(eps=DBSCAN_EPS, min_samples=MIN_SAMPLES, metric='euclidean').fit(embeddings)
+cluster_labels = db.labels_
 
-# Uruchomienie algorytmu DBSCAN
-clustering = DBSCAN(eps=DBSCAN_EPS, min_samples=DBSCAN_MIN_SAMPLES, metric='euclidean').fit(all_features)
-labels = clustering.labels_
-num_unique_persons = len(set(labels)) - (1 if -1 in labels else 0)
-print(f"Klasteryzacja zakończona. Znaleziono {num_unique_persons} unikalnych osób.")
+person_ids = {}
+person_counter = 0
+for i, label in enumerate(cluster_labels):
+    if label != -1: # -1 is the label for noise/outliers
+        if label not in person_ids:
+            person_ids[label] = f"Person {person_counter}"
+            person_counter += 1
+        all_faces_data[i]["person_id"] = person_ids[label]
+    else:
+        all_faces_data[i]["person_id"] = "Unknown"
 
-# Mapowanie tymczasowych ID śladów na finalne ID osób
-person_map = {track_id: f"Osoba_{label}" for track_id, label in zip(track_id_map, labels) if label != -1}
+print(f"Clustering complete. Found {person_counter} unique persons.")
 
-# Obliczanie czasu na ekranie
-screen_time = defaultdict(float)
-frame_duration = 1.0 / fps
+# --- Generate On-Screen Time Summary ---
+person_frame_counts = collections.defaultdict(set)
+for data in all_faces_data:
+    if data["person_id"] != "Unknown":
+        person_frame_counts[data["person_id"]].add(data["frame_num"])
 
-for track_id, person_label in person_map.items():
-    num_processed_frames = len(track_frames[track_id])
-    estimated_total_frames = num_processed_frames * FRAME_PROCESSING_INTERVAL
-    time_in_track = estimated_total_frames * frame_duration
-    screen_time[person_label] += time_in_track
+with open(OUTPUT_SUMMARY_PATH, "w") as f:
+    f.write(f"On-Screen Time Summary for: {VIDEO_NAME}.mp4\n")
+    f.write("-" * 40 + "\n")
+    for person_id, frames in sorted(person_frame_counts.items()):
+        # Time is the number of frames they appeared in, divided by the sample rate, divided by fps
+        duration_seconds = len(frames) * PROCESS_EVERY_N_FRAMES / fps
+        f.write(f"{person_id}: {duration_seconds:.2f} seconds\n")
+print(f"On-screen time summary saved to '{OUTPUT_SUMMARY_PATH}'")
 
-# --- Wyświetlanie wyników ---
-print("\n--- Wyniki Analizy ---")
-if not screen_time:
-    print("Nie zidentyfikowano żadnych unikalnych osób.")
-    print("Wskazówka: Spróbuj dostosować parametry DBSCAN (np. DBSCAN_MIN_SAMPLES, DBSCAN_EPS).")
+
+# --- Create Annotated GIF ---
+print("\nRendering GIF...")
+frames_with_faces = collections.defaultdict(list)
+for data in all_faces_data:
+    frames_with_faces[data["frame_num"]].append(data)
+
+cap = cv2.VideoCapture(INPUT_VIDEO_PATH)
+gif_frames = []
+
+for frame_num in tqdm(sorted(frames_with_faces.keys()), desc="Pass 2: Rendering GIF frames"):
+    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
+    ret, frame = cap.read()
+    if not ret:
+        continue
+
+    for data in frames_with_faces[frame_num]:
+        p_box = data["person_box"]
+        f_box = data["face_box"]
+        person_id = data["person_id"]
+
+        cv2.rectangle(frame, (p_box[0], p_box[1]), (p_box[2], p_box[3]), (255, 0, 0), 2)
+        cv2.rectangle(frame, (f_box[0], f_box[1]), (f_box[2], f_box[3]), (0, 255, 0), 2)
+        
+        label_pos = (f_box[0], f_box[1] - 10)
+        cv2.putText(frame, person_id, label_pos, cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+
+    rgb_frame_for_gif = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    pil_image = Image.fromarray(rgb_frame_for_gif)
+    gif_frames.append(pil_image)
+
+cap.release()
+
+if gif_frames:
+    print(f"\nSaving GIF to '{OUTPUT_GIF_PATH}'...")
+    gif_frames[0].save(
+        OUTPUT_GIF_PATH,
+        save_all=True,
+        append_images=gif_frames[1:],
+        optimize=False,
+        duration=100, # Duration per frame in ms
+        loop=0
+    )
+    print("✅ Done!")
 else:
-    sorted_screen_time = sorted(screen_time.items(), key=lambda item: item[1], reverse=True)
-    for person, time in sorted_screen_time:
-        print(f"{person}: {time:.2f} sekund")
+    print("Could not generate GIF as no frames with faces were processed.")

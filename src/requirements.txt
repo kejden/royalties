@@ -1,9 +1,18 @@
-numpy
-opencv-python
+# requirements.txt
+
+# For computer vision and deep learning
+ultralytics
 torch
 torchvision
+
+# For machine learning algorithms like DBSCAN
 scikit-learn
-ultralytics
-tqdm
-scipy
-lap
+
+# For image processing
+Pillow
+
+# The traceback indicated you might be using face_recognition
+face-recognition
+
+# A core dependency for numerical operations
+numpy
