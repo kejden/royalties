@@ -1,18 +1,25 @@
 # requirements.txt
 
-# For computer vision and deep learning
+# --- Core Deep Learning & Computer Vision ---
+# IMPORTANT FOR GPU: These PyTorch versions are examples. You MUST install the
+# correct version for your specific CUDA setup from the official PyTorch website:
+# https://pytorch.org/get-started/locally/
+# torch>=2.0.0
+# torchvision>=0.15.0
+
 ultralytics
-torch
-torchvision
-
-# For machine learning algorithms like DBSCAN
-scikit-learn
-
-# For image processing
+opencv-python
 Pillow
 
-# The traceback indicated you might be using face_recognition
+# --- Face Recognition ---
+# IMPORTANT FOR GPU: For GPU support, 'dlib' (a dependency of face-recognition)
+# must be compiled from source with CUDA enabled. A standard pip install
+# will NOT use your GPU for face recognition.
 face-recognition
 
-# A core dependency for numerical operations
+# --- Machine Learning & Data Handling ---
+scikit-learn
 numpy
+
+# --- Utilities ---
+tqdm

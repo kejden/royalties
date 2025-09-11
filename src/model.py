@@ -7,7 +7,7 @@ import face_recognition
 from sklearn.cluster import DBSCAN
 from PIL import Image
 import collections
-from tqdm import tqdm # Import tqdm for progress bars
+from tqdm import tqdm
 
 # --- CONFIGURATION ---
 VIDEO_NAME = "video_5"
@@ -15,21 +15,21 @@ VIDEO_NAME = "video_5"
 # --- PATHS ---
 INPUT_VIDEO_PATH = f"../movies/{VIDEO_NAME}.mp4"
 OUTPUT_GIF_PATH = f"../gifs/{VIDEO_NAME}.gif"
-OUTPUT_SUMMARY_PATH = f"../gifs/{VIDEO_NAME}_summary.txt" # Path for the new summary file
+OUTPUT_SUMMARY_PATH = f"../gifs/{VIDEO_NAME}_summary.txt"
 
 # --- PROCESSING SETTINGS ---
-PROCESS_EVERY_N_FRAMES = 2  # Process 1 frame every N frames to speed things up
-RESIZE_FACTOR = 0.5         # Resize frames to speed up processing (0.5 = half size)
+PROCESS_EVERY_N_FRAMES = 2
+RESIZE_FACTOR = 0.5
 
 # --- CLUSTERING SETTINGS ---
-DBSCAN_EPS = 0.42           # Clustering sensitivity: lower is stricter, higher is more lenient
-MIN_SAMPLES = 2             # Minimum occurrences of a face to be considered a person
+DBSCAN_EPS = 0.42
+MIN_SAMPLES = 2
 
 # --- INITIALIZATION ---
-# This line is a fix for a specific PyTorch/Ultralytics version incompatibility
 torch.serialization.add_safe_globals([tasks.DetectionModel])
 
 print("Loading YOLO model...")
+# YOLO will automatically use the GPU if PyTorch is set up correctly.
 person_detector = YOLO("yolov8n.pt")
 PERSON_CLASS_ID = 0
 
@@ -51,9 +51,11 @@ for frame_num in tqdm(range(total_frames), desc="Pass 1: Extracting face data"):
         small_frame = cv2.resize(frame, (int(width * RESIZE_FACTOR), int(height * RESIZE_FACTOR)))
         rgb_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
 
-        person_results = person_detector(small_frame, classes=[PERSON_CLASS_ID], verbose=False)
-        person_boxes = person_results[0].boxes.xyxy.cpu().numpy()
+        # Tell YOLO to explicitly use the first GPU (device=0) for inference
+        person_results = person_detector(small_frame, classes=[PERSON_CLASS_ID], verbose=False, device=0)
+        person_boxes = person_results[0].boxes.xyxy.cpu().numpy() # Move results to CPU for numpy/cv2
 
+        # This will automatically use the GPU if dlib was compiled with CUDA support.
         face_locations = face_recognition.face_locations(rgb_frame, model='cnn')
         face_encodings = face_recognition.face_encodings(rgb_frame, face_locations)
 
@@ -78,6 +80,7 @@ cap.release()
 print(f"Pass 1 complete. Found a total of {len(all_faces_data)} face instances.")
 
 # --- PASS 2: CLUSTERING, SUMMARY & GIF CREATION ---
+# (No changes needed in Pass 2 as DBSCAN runs on the CPU)
 if not all_faces_data:
     print("No faces were detected in the video. Exiting.")
     exit()
@@ -90,7 +93,7 @@ cluster_labels = db.labels_
 person_ids = {}
 person_counter = 0
 for i, label in enumerate(cluster_labels):
-    if label != -1: # -1 is the label for noise/outliers
+    if label != -1:
         if label not in person_ids:
             person_ids[label] = f"Person {person_counter}"
             person_counter += 1
@@ -100,7 +103,6 @@ for i, label in enumerate(cluster_labels):
 
 print(f"Clustering complete. Found {person_counter} unique persons.")
 
-# --- Generate On-Screen Time Summary ---
 person_frame_counts = collections.defaultdict(set)
 for data in all_faces_data:
     if data["person_id"] != "Unknown":
@@ -110,13 +112,10 @@ with open(OUTPUT_SUMMARY_PATH, "w") as f:
     f.write(f"On-Screen Time Summary for: {VIDEO_NAME}.mp4\n")
     f.write("-" * 40 + "\n")
     for person_id, frames in sorted(person_frame_counts.items()):
-        # Time is the number of frames they appeared in, divided by the sample rate, divided by fps
         duration_seconds = len(frames) * PROCESS_EVERY_N_FRAMES / fps
         f.write(f"{person_id}: {duration_seconds:.2f} seconds\n")
 print(f"On-screen time summary saved to '{OUTPUT_SUMMARY_PATH}'")
 
-
-# --- Create Annotated GIF ---
 print("\nRendering GIF...")
 frames_with_faces = collections.defaultdict(list)
 for data in all_faces_data:
@@ -155,7 +154,7 @@ if gif_frames:
         save_all=True,
         append_images=gif_frames[1:],
         optimize=False,
-        duration=100, # Duration per frame in ms
+        duration=100,
         loop=0
     )
     print("✅ Done!")
