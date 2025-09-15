@@ -1,0 +1,169 @@
+# main.py
+
+import streamlit as st
+import os
+import pandas as pd
+from moviepy.editor import VideoFileClip
+from streamlit_timeline import timeline
+
+# --- 1. KONFIGURACJA: Ustaw ścieżkę do pliku wideo ---
+VIDEO_FILE_PATH = "../movies/Kiler.mp4" 
+
+# --- Konfiguracja strony ---
+st.set_page_config(layout="wide", page_title="Movie Analysis Dashboard")
+
+# --- Dynamiczne pobieranie czasu trwania wideo ---
+if not os.path.exists(VIDEO_FILE_PATH):
+    st.error(f"🚨 Plik wideo nie został znaleziony w: {VIDEO_FILE_PATH}")
+    st.info("Zaktualizuj zmienną `VIDEO_FILE_PATH` w skrypcie.")
+    st.stop()
+
+with VideoFileClip(VIDEO_FILE_PATH) as clip:
+    TOTAL_VIDEO_DURATION_SECONDS = int(clip.duration)
+
+# --- Inicjalizacja Session State ---
+if 'start_time' not in st.session_state:
+    st.session_state.start_time = 0
+if 'clicked_time' not in st.session_state:
+    st.session_state.clicked_time = None
+    
+# --- Dane ---
+ACTORS_DATA = {
+    "Cezary Pazura": {
+        "thumbnail": "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcRntQJjsN_F2wq9PnGo8N5fIBu2rKic9dEgUg&s",
+        "appearance_percentage": 35.6,
+        "tags": ["Male", "Business suit", "Indoors"],
+        "timestamps": [(3212, 3240)]
+    },
+    "Janusz Rewinski": {
+        "thumbnail": "https://upload.wikimedia.org/wikipedia/commons/d/dc/Rewinski_Janusz.jpg",
+        "appearance_percentage": 18.2,
+        "tags": ["Male", "Beard", "Outdoor"],
+        "timestamps": [(1898, 1920)]
+    },
+    "Małgorzata Kożuchowska": {
+        "thumbnail": "https://fwcdn.pl/ppo/00/40/40/453916.2.jpg",
+        "appearance_percentage": 62.9,
+        "tags": ["Female", "Smiling", "Long hair"],
+        "timestamps": [(2048, 2200), (4500, 4600)]
+    }
+}
+
+# --- Obliczanie maksymalnego czasu trwania na podstawie danych ---
+max_timestamp_from_data = 0
+for actor in ACTORS_DATA.values():
+    for start, end in actor.get("timestamps", []):
+        if end > max_timestamp_from_data:
+            max_timestamp_from_data = end
+
+TIMELINE_DURATION = max(TOTAL_VIDEO_DURATION_SECONDS, max_timestamp_from_data)
+
+# --- Funkcja do formatowania sekund na HH:MM:SS ---
+def format_time(seconds):
+    if seconds is None:
+        return "00:00:00"
+    hours = int(seconds // 3600)
+    mins = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+    return f"{hours:02d}:{mins:02d}:{secs:02d}"
+
+# --- FUNKCJE DLA PRZYCISKÓW NAWIGACJI ---
+def play_previous_segment(actor_timestamps, current_time):
+    sorted_timestamps = sorted(actor_timestamps, key=lambda x: x[0], reverse=True)
+    prev_segment_start = 0
+    for start, end in sorted_timestamps:
+        if start < current_time:
+            prev_segment_start = start
+            break
+    st.session_state.start_time = prev_segment_start
+    st.rerun()
+
+def play_next_segment(actor_timestamps, current_time):
+    sorted_timestamps = sorted(actor_timestamps, key=lambda x: x[0])
+    next_segment_start = TIMELINE_DURATION
+    for start, end in sorted_timestamps:
+        if start > current_time:
+            next_segment_start = start
+            break
+    st.session_state.start_time = next_segment_start
+    st.rerun()
+
+# --- Główny interfejs użytkownika ---
+st.title("🎬 Interaktywny Dashboard Analizy Scen")
+left_col, right_col = st.columns([2, 1])
+
+with left_col:
+    st.header("Odtwarzacz wideo")
+    st.video(VIDEO_FILE_PATH, start_time=st.session_state.start_time)
+
+with right_col:
+    st.header("Panel Analizy")
+    actor_list = list(ACTORS_DATA.keys())
+    selected_actor_id = st.selectbox("Wybierz obserwowaną osobę", actor_list)
+    actor_info = ACTORS_DATA.get(selected_actor_id, {})
+    
+    if actor_info:
+        thumb_col, detail_col = st.columns([1, 2])
+        with thumb_col:
+            # FIX: Updated st.image to use the modern parameter for filling columns
+            st.image(actor_info["thumbnail"], use_column_width='always')
+        with detail_col:
+            st.subheader(selected_actor_id)
+            st.metric(label="Pojawia się w", value=f"{actor_info['appearance_percentage']}% wideo")
+            st.caption("🏷️ Tagi: " + " • ".join(actor_info['tags']))
+    else:
+        st.warning("Nie znaleziono danych dla wybranej osoby.")
+
+# --- NOWA INTERAKTYWNA OŚ CZASU (Z KOMPONENTU) ---
+st.divider()
+st.header(f"Interaktywna oś czasu dla: {selected_actor_id}")
+st.metric("Całkowita długość osi czasu", format_time(TIMELINE_DURATION))
+
+if actor_info:
+    # 1. Sformatuj dane dla komponentu osi czasu
+    timeline_items = []
+    for i, (start, end) in enumerate(actor_info.get("timestamps", [])):
+        # The component expects string-formatted dates
+        timeline_items.append({
+            "id": start,
+            "content": f"Scena #{i+1}",
+            "start": pd.to_datetime(start, unit='s').strftime('%Y-%m-%d %H:%M:%S'),
+            "end": pd.to_datetime(end, unit='s').strftime('%Y-%m-%d %H:%M:%S'),
+        })
+
+    if timeline_items:
+        # FIX: The timeline component API is non-standard and does not accept a 'key'.
+        # We must call it with only the data.
+        clicked_event_id = timeline(timeline_items)
+
+        # 4. Obsłuż kliknięcie na osi czasu
+        if clicked_event_id:
+            new_start_time = int(clicked_event_id)
+            if st.session_state.start_time != new_start_time:
+                st.session_state.start_time = new_start_time
+                st.rerun()
+    else:
+        st.info(f"Brak zarejestrowanych scen dla {selected_actor_id}.")
+
+    # --- Przyciski nawigacyjne ---
+    st.write("")
+    col1, col2, col3 = st.columns([1, 4, 1])
+    actor_timestamps = actor_info.get("timestamps", [])
+    
+    with col1:
+        st.button(
+            "|◁ Poprzednia scena", 
+            on_click=play_previous_segment, 
+            args=(actor_timestamps, st.session_state.start_time),
+            width='stretch'
+        )
+    with col3:
+        st.button(
+            "Następna scena ▷|", 
+            on_click=play_next_segment, 
+            args=(actor_timestamps, st.session_state.start_time),
+            width='stretch'
+        )
+        
+else:
+    st.info("Wybierz osobę z listy, aby zobaczyć i używać osi czasu.")

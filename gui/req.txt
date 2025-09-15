@@ -1,0 +1,5 @@
+streamlit
+matplotlib
+moviepy==1.0.3
+streamlit-image-coordinates
+Pillow
